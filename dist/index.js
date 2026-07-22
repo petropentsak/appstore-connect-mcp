@@ -206,6 +206,15 @@ function createMcpServer() {
                     },
                 },
                 {
+                    name: 'list_version_localizations',
+                    description: 'List the store locales (and their release notes / promo text) present on an App Store version.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: { versionId: { type: 'string', description: 'App Store version ID' } },
+                        required: ['versionId'],
+                    },
+                },
+                {
                     name: 'list_app_store_versions',
                     description: 'List all app store versions for an app',
                     inputSchema: {
@@ -738,6 +747,12 @@ ${details.secondarySubcategoryTwo ? `• Secondary Subcategory 2: ${details.seco
                             ? `⏳ Build ${r.buildId ?? ''} still processing (state: ${r.processingState}). Retry shortly.`
                             : `❔ No matching build found yet for version ${versionId}. Retry once the upload appears.`;
                     return { content: [{ type: 'text', text: msg }] };
+                }
+                case 'list_version_localizations': {
+                    const { versionId } = args;
+                    const locs = await appStoreClient.listVersionLocalizations(versionId);
+                    const text = locs.length ? locs.map((l) => `• ${l.locale}`).join('\n') : 'No localizations.';
+                    return { content: [{ type: 'text', text: `🌐 Localizations on version ${versionId}:\n${text}` }] };
                 }
                 case 'submit_for_review': {
                     const { appId, versionId, releaseType } = args;

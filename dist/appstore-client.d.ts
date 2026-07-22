@@ -151,6 +151,15 @@ export declare class AppStoreConnectClient {
         submissionId: string;
     }>;
     /**
+     * List the localizations (store locales + their whatsNew/promotionalText) on an App Store
+     * version — so callers can update only the locales the app actually offers.
+     */
+    listVersionLocalizations(versionId: string): Promise<Array<{
+        locale: string;
+        whatsNew?: string;
+        promotionalText?: string;
+    }>>;
+    /**
      * Get customer reviews for an app
      */
     getCustomerReviews(appId: string, limit?: number): Promise<any[]>;

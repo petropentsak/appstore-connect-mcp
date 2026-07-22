@@ -599,6 +599,24 @@ export class AppStoreConnectClient {
         }
     }
     /**
+     * List the localizations (store locales + their whatsNew/promotionalText) on an App Store
+     * version — so callers can update only the locales the app actually offers.
+     */
+    async listVersionLocalizations(versionId) {
+        try {
+            const data = await this.makeRequest(`/v1/appStoreVersions/${versionId}/appStoreVersionLocalizations?limit=200`);
+            return (data.data ?? []).map((l) => ({
+                locale: l.attributes.locale,
+                whatsNew: l.attributes.whatsNew,
+                promotionalText: l.attributes.promotionalText,
+            }));
+        }
+        catch (error) {
+            console.error('Error listing version localizations:', error);
+            throw new Error(`Failed to list version localizations: ${error.message}`);
+        }
+    }
+    /**
      * Get customer reviews for an app
      */
     async getCustomerReviews(appId, limit = 50) {
