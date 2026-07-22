@@ -13,6 +13,8 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { AppStoreConnectClient } from './appstore-client.js';
 import dotenv from 'dotenv';
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 // Load environment variables (harmless no-op when launched with env already injected).
 dotenv.config();
 // Read a credential from the ASC_* names (primary), falling back to the upstream APPLE_* names.
@@ -742,8 +744,20 @@ async function main() {
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
 }
-// Start the server if this file is run directly.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Start the server if this file is the entry point. Resolve argv[1] through realpath so
+// launching via a bin symlink (e.g. `npx github:...`) still matches import.meta.url.
+function isMainModule() {
+    const entry = process.argv[1];
+    if (!entry)
+        return false;
+    try {
+        return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+    }
+    catch {
+        return false;
+    }
+}
+if (isMainModule()) {
     main().catch((error) => {
         console.error('💥 Server crashed:', error);
         process.exit(1);
