@@ -514,6 +514,91 @@ export class AppStoreConnectClient {
         }
     }
     /**
+     * Find the latest uploaded build for an app + build (version) string and attach it to an
+     * App Store version, if it has finished processing. Single-shot (no long polling): returns a
+     * status so the caller can retry while the build is still processing.
+     */
+    async attachBuild(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            let build;
+            if (params.buildId) {
+                const data = await this.makeRequest(`/v1/builds/${params.buildId}`);
+                build = data.data;
+            }
+            else {
+                if (!params.buildVersionString) {
+                    throw new Error('Provide either buildId or buildVersionString to locate the build.');
+                }
+                const data = await this.makeRequest(`/v1/builds?filter[app]=${appId}&filter[version]=${encodeURIComponent(params.buildVersionString)}&sort=-uploadedDate&limit=1`);
+                build = data.data?.[0];
+            }
+            if (!build)
+                return { status: 'not_found' };
+            const state = build.attributes?.processingState;
+            if (state !== 'VALID')
+                return { status: 'processing', buildId: build.id, processingState: state };
+            await this.makeRequest(`/v1/appStoreVersions/${params.versionId}/relationships/build`, {
+                method: 'PATCH',
+                body: { data: { type: 'builds', id: build.id } },
+            });
+            return { status: 'attached', buildId: build.id, processingState: state };
+        }
+        catch (error) {
+            console.error('Error attaching build:', error);
+            throw new Error(`Failed to attach build: ${error.message}`);
+        }
+    }
+    /**
+     * Submit an App Store version for review (iOS reviewSubmissions flow): optionally set the
+     * release type, then create a submission, add the version as an item, and mark it submitted.
+     */
+    async submitForReview(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            if (params.releaseType) {
+                await this.makeRequest(`/v1/appStoreVersions/${params.versionId}`, {
+                    method: 'PATCH',
+                    body: {
+                        data: { id: params.versionId, type: 'appStoreVersions', attributes: { releaseType: params.releaseType } },
+                    },
+                });
+            }
+            const submission = await this.makeRequest('/v1/reviewSubmissions', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'reviewSubmissions',
+                        attributes: { platform: 'IOS' },
+                        relationships: { app: { data: { type: 'apps', id: appId } } },
+                    },
+                },
+            });
+            const submissionId = submission.data.id;
+            await this.makeRequest('/v1/reviewSubmissionItems', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'reviewSubmissionItems',
+                        relationships: {
+                            reviewSubmission: { data: { type: 'reviewSubmissions', id: submissionId } },
+                            appStoreVersion: { data: { type: 'appStoreVersions', id: params.versionId } },
+                        },
+                    },
+                },
+            });
+            await this.makeRequest(`/v1/reviewSubmissions/${submissionId}`, {
+                method: 'PATCH',
+                body: { data: { id: submissionId, type: 'reviewSubmissions', attributes: { submitted: true } } },
+            });
+            return { submissionId };
+        }
+        catch (error) {
+            console.error('Error submitting for review:', error);
+            throw new Error(`Failed to submit for review: ${error.message}`);
+        }
+    }
+    /**
      * Get customer reviews for an app
      */
     async getCustomerReviews(appId, limit = 50) {

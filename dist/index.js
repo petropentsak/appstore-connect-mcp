@@ -175,6 +175,37 @@ function createMcpServer() {
                     },
                 },
                 {
+                    name: 'attach_build',
+                    description: 'Attach a processed TestFlight build to an App Store version. Single-shot: returns attached | processing | not_found so the caller can retry while the build is still processing.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            versionId: { type: 'string', description: 'App Store version ID to attach the build to' },
+                            buildId: { type: 'string', description: 'Build ID to attach (optional; else located by buildVersionString)' },
+                            buildVersionString: { type: 'string', description: 'Build (version) string to locate the latest matching build' },
+                        },
+                        required: ['appId', 'versionId'],
+                    },
+                },
+                {
+                    name: 'submit_for_review',
+                    description: 'Submit an App Store version for review (iOS reviewSubmissions flow). Optionally sets the release type first.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            versionId: { type: 'string', description: 'App Store version ID to submit' },
+                            releaseType: {
+                                type: 'string',
+                                description: 'Optional release type to set before submitting',
+                                enum: ['MANUAL', 'AFTER_APPROVAL', 'SCHEDULED'],
+                            },
+                        },
+                        required: ['appId', 'versionId'],
+                    },
+                },
+                {
                     name: 'list_app_store_versions',
                     description: 'List all app store versions for an app',
                     inputSchema: {
@@ -694,6 +725,28 @@ ${details.primarySubcategoryTwo ? `• Primary Subcategory 2: ${details.primaryS
 ${details.secondaryCategory ? `• Secondary Category: ${details.secondaryCategory}` : ''}
 ${details.secondarySubcategoryOne ? `• Secondary Subcategory 1: ${details.secondarySubcategoryOne}` : ''}
 ${details.secondarySubcategoryTwo ? `• Secondary Subcategory 2: ${details.secondarySubcategoryTwo}` : ''}` : `No detailed info found for app ${appId}.`,
+                            },
+                        ],
+                    };
+                }
+                case 'attach_build': {
+                    const { appId, versionId, buildId, buildVersionString } = args;
+                    const r = await appStoreClient.attachBuild({ appId, versionId, buildId, buildVersionString });
+                    const msg = r.status === 'attached'
+                        ? `✅ Build ${r.buildId} attached to version ${versionId}.`
+                        : r.status === 'processing'
+                            ? `⏳ Build ${r.buildId ?? ''} still processing (state: ${r.processingState}). Retry shortly.`
+                            : `❔ No matching build found yet for version ${versionId}. Retry once the upload appears.`;
+                    return { content: [{ type: 'text', text: msg }] };
+                }
+                case 'submit_for_review': {
+                    const { appId, versionId, releaseType } = args;
+                    const r = await appStoreClient.submitForReview({ appId, versionId, releaseType });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `✅ Submitted version ${versionId} for App Store review${releaseType ? ` (${releaseType} release)` : ''}. Submission ID: ${r.submissionId}`,
                             },
                         ],
                     };

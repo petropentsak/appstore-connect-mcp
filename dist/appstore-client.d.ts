@@ -125,6 +125,32 @@ export declare class AppStoreConnectClient {
         buildId?: string;
     }): Promise<AppStoreVersion>;
     /**
+     * Find the latest uploaded build for an app + build (version) string and attach it to an
+     * App Store version, if it has finished processing. Single-shot (no long polling): returns a
+     * status so the caller can retry while the build is still processing.
+     */
+    attachBuild(params: {
+        appId: string;
+        versionId: string;
+        buildId?: string;
+        buildVersionString?: string;
+    }): Promise<{
+        status: 'attached' | 'processing' | 'not_found';
+        buildId?: string;
+        processingState?: string;
+    }>;
+    /**
+     * Submit an App Store version for review (iOS reviewSubmissions flow): optionally set the
+     * release type, then create a submission, add the version as an item, and mark it submitted.
+     */
+    submitForReview(params: {
+        appId: string;
+        versionId: string;
+        releaseType?: 'MANUAL' | 'AFTER_APPROVAL' | 'SCHEDULED';
+    }): Promise<{
+        submissionId: string;
+    }>;
+    /**
      * Get customer reviews for an app
      */
     getCustomerReviews(appId: string, limit?: number): Promise<any[]>;
