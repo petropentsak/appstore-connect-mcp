@@ -1,158 +1,57 @@
-# Apple Store Connect MCP Server
+# appstore-connect-mcp
 
-A Model Context Protocol (MCP) server that provides tools for interacting with Apple Store Connect API, enabling management of iOS/macOS apps, TestFlight, app metadata, and more through Claude Desktop or other MCP clients.
+A **local, single-tenant stdio MCP server** for the Apple App Store Connect API.
 
-## Features
+Fork of [ryaker/appstore-connect-mcp](https://github.com/ryaker/appstore-connect-mcp) (MIT) with **all hosted infrastructure removed**. This variant exists so App Store Connect credentials never leave the machine.
 
-### App Management
-- **List Apps**: View all apps in your App Store Connect account
-- **App Information**: Get detailed app info including status and metadata
-- **App Store Versions**: Create and manage app store versions
-- **Localization**: Update app descriptions and metadata for different markets
+## Security posture
 
-### Analytics & Sales
-- **Sales Data**: Retrieve sales and revenue information
-- **Analytics**: Access app analytics including installs and user engagement
-- **Customer Reviews**: Read and analyze customer feedback
-- **Pricing Information**: View current app pricing across different regions
+- **Credentials from environment only.** Reads `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_PRIVATE_KEY` (falls back to `APPLE_*`). Nothing is persisted.
+- **No external infrastructure.** The upstream project could store your `.p8` key in Supabase and expose it behind an Auth0/Stytch OAuth server on Vercel. All of that is deleted — no Express, no Supabase, no Auth0/Stytch, no OAuth, no HTTP transport.
+- **JWT signed locally** (ES256, `jsonwebtoken`) and every request goes **directly to `api.appstoreconnect.apple.com`**. No proxy, no telemetry, no phone-home.
+- **Minimal dependency surface:** `@modelcontextprotocol/sdk`, `jsonwebtoken`, `dotenv`.
+- No install-time scripts (`postinstall`/`prepare`).
 
-### TestFlight Integration
-- **Build Management**: View TestFlight builds and their status
-- **Beta Groups**: Manage TestFlight beta testing groups
-- **Tester Management**: Add and manage beta testers
+> Known audit note: `@modelcontextprotocol/sdk` transitively pulls `@hono/node-server` (moderate advisory). It is only used by the SDK's HTTP/SSE transport, which this server never imports — it is not reachable in stdio mode.
 
-### Additional Features
-- **In-App Purchases**: View and manage in-app purchase products
-- **App Availability**: Check app availability across different regions
-- **Category & Rating**: Access app category and age rating information
+## Tools (15)
 
-## Setup
+`list_apps`, `get_app_info`, `get_app_info_details`, `get_app_availability`, `get_app_pricing`,
+`get_in_app_purchases`, `get_builds`, `list_app_store_versions`, `create_app_store_version`,
+`update_app_store_version_localization`, `get_analytics`, `get_sales_data`, `get_customer_reviews`,
+`list_beta_groups`, `add_tester_to_beta_group`.
 
-### Prerequisites
-- Node.js 18+
-- Apple Developer Account with App Store Connect access
-- App Store Connect API key
+## Usage (Claude Code / Desktop)
 
-### Apple Store Connect API Key Setup
-
-1. **Generate API Key**:
-   - Go to [App Store Connect](https://appstoreconnect.apple.com)
-   - Navigate to Users and Access → Integrations → App Store Connect API
-   - Create a new API key with appropriate permissions
-
-2. **Environment Variables**:
-   ```bash
-   APPLE_KEY_ID=your_key_id
-   APPLE_ISSUER_ID=your_issuer_id  
-   APPLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
-   your_private_key_content
-   -----END PRIVATE KEY-----"
-   APPLE_BUNDLE_ID=com.yourcompany.yourapp
-   ```
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/ryaker/appstore-connect-mcp.git
-cd appstore-connect-mcp
-
-# Install dependencies
-npm install
-
-# Build the project
-npm run build
-
-# Start the server
-npm start
-```
-
-### Claude Desktop Configuration
-
-Add to your Claude Desktop `claude_desktop_config.json`:
-
-```json
+```jsonc
 {
   "mcpServers": {
     "appstore-connect": {
-      "command": "node",
-      "args": ["/path/to/appstore-connect-mcp/dist/src/index.js"],
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "github:petropentsak/appstore-connect-mcp#v0.1.0"],
       "env": {
-        "APPLE_KEY_ID": "your_key_id",
-        "APPLE_ISSUER_ID": "your_issuer_id",
-        "APPLE_PRIVATE_KEY": "your_private_key",
-        "APPLE_BUNDLE_ID": "com.yourcompany.yourapp"
+        "ASC_KEY_ID": "...",
+        "ASC_ISSUER_ID": "...",
+        "ASC_PRIVATE_KEY": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
       }
     }
   }
 }
 ```
 
-## Usage
+The URL is pinned to an immutable tag so `npx` caches it. `dist/` is committed, so there is **no build step at launch** (this is what keeps `npx github:` reliable).
 
-Once configured, you can ask Claude to:
+## Development
 
-- "Show me my app's latest sales data"
-- "List all TestFlight builds for my app"
-- "What are the recent customer reviews?"
-- "Create a new app store version"
-- "Add a beta tester to my TestFlight group"
-
-## Remote Deployment with OAuth
-
-### Auth0 Setup (for Remote Access)
-
-1. **Create Auth0 API**:
-   - Log into [Auth0 Dashboard](https://manage.auth0.com)
-   - Create new API (not Application)
-   - Note the Identifier (becomes your audience)
-
-2. **Configure OAuth Settings**:
-```env
-OAUTH_ENABLED=true
-AUTH0_DOMAIN=https://your-tenant.auth0.com
-AUTH0_AUDIENCE=https://your-api-identifier
-```
-
-3. **Deploy to Vercel**:
 ```bash
-vercel --prod
+npm install
+npm run build      # tsc -> dist/ (commit dist/ before tagging)
+npm run dev        # tsx src/index.ts
 ```
 
-4. **Configure Claude Desktop for Remote Access**:
-```json
-{
-  "mcpServers": {
-    "appstore-connect": {
-      "url": "https://your-deployment.vercel.app/mcp"
-    }
-  }
-}
-```
+Release flow: edit → `npm run build` → commit (include `dist/`) → `git tag vX.Y` → `git push origin HEAD --tags` → bump the `#vX.Y` tag in your MCP config.
 
-Claude will automatically discover OAuth configuration and handle authentication.
+## Credit
 
-## Authentication
-
-This server supports two authentication modes:
-- **Local**: Direct API key authentication with Apple Store Connect
-- **Remote**: OAuth 2.0 via Auth0 for secure remote access
-
-## Requirements
-
-- Valid Apple Developer Program membership
-- App Store Connect access
-- API key with appropriate permissions (typically App Manager or Admin)
-
-## License
-
-MIT License - see LICENSE file for details
-
-## Contributing
-
-Contributions welcome! Please read our contributing guidelines and submit pull requests for any improvements.
-
-## Support
-
-- Create an issue for bugs or feature requests
-- Check Apple's App Store Connect API documentation for API-specific questions
+Based on [ryaker/appstore-connect-mcp](https://github.com/ryaker/appstore-connect-mcp). MIT license retained.

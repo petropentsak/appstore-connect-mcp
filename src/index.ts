@@ -1,64 +1,54 @@
+#!/usr/bin/env node
 /**
- * Express-based MCP Server using Official MCP TypeScript SDK
- * Implements Apple Store Connect API tools with proper OAuth authentication
+ * Local stdio MCP server for App Store Connect (fork of ryaker/appstore-connect-mcp, MIT).
+ * All hosted infra (Express/OAuth/Auth0/Stytch/Supabase/Vercel) has been stripped:
+ * credentials come only from environment variables, JWTs are signed locally, and every
+ * request goes directly to api.appstoreconnect.apple.com. Nothing is sent to any third party.
  */
+
+// stdio transport uses stdout for the JSON-RPC stream — any stray stdout write corrupts it.
+// Redirect all console.log to stderr before anything else loads.
+console.log = (...args: unknown[]) => console.error(...args);
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { HttpTransport } from './transport/HttpTransport.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { AppStoreConnectClient, type AppStoreConfig } from './appstore-client.js';
 import dotenv from 'dotenv';
 
-// Load environment variables
+// Load environment variables (harmless no-op when launched with env already injected).
 dotenv.config();
 
-// Function to get Apple Store config at runtime
+// Read a credential from the ASC_* names (primary), falling back to the upstream APPLE_* names.
+function readEnv(ascName: string, appleName: string): string {
+  return (process.env[ascName] || process.env[appleName] || '').trim();
+}
+
+// Function to get App Store config at runtime.
 function getAppStoreConfig(): AppStoreConfig {
-  // Apple Store Connect configuration - handle base64 encoded private key
-  let privateKey = process.env.APPLE_PRIVATE_KEY || '';
+  // Handle a private key supplied either as raw PEM or base64-encoded PEM.
+  let privateKey = readEnv('ASC_PRIVATE_KEY', 'APPLE_PRIVATE_KEY');
   if (!privateKey) {
-    console.error('❌ APPLE_PRIVATE_KEY environment variable is not set!');
-    privateKey = ''; // Prevent crash, will fail when trying to use
-  } else {
-    privateKey = privateKey.trim();
-    console.log('🔑 Private key starts with:', privateKey.substring(0, 30));
-    
-    // Check if private key is base64 encoded (Vercel stores it this way)
-    if (!privateKey.includes('BEGIN PRIVATE KEY')) {
-      try {
-        const decoded = Buffer.from(privateKey, 'base64').toString('utf-8').trim();
-        console.log('📝 Decoded key starts with:', decoded.substring(0, 30));
-        if (decoded.includes('BEGIN PRIVATE KEY')) {
-          privateKey = decoded;
-          console.log('✅ Successfully decoded base64 private key');
-        }
-      } catch (e) {
-        console.error('❌ Failed to decode base64:', e);
-        // Not base64, try replacing escaped newlines
-        privateKey = privateKey.replace(/\\n/g, '\n');
-      }
-    } else {
-      // Fix any escaped newlines
+    console.error('❌ ASC_PRIVATE_KEY (or APPLE_PRIVATE_KEY) is not set!');
+  } else if (!privateKey.includes('BEGIN PRIVATE KEY')) {
+    try {
+      const decoded = Buffer.from(privateKey, 'base64').toString('utf-8').trim();
+      if (decoded.includes('BEGIN PRIVATE KEY')) privateKey = decoded;
+      else privateKey = privateKey.replace(/\\n/g, '\n');
+    } catch {
       privateKey = privateKey.replace(/\\n/g, '\n');
-      console.log('✅ Using private key as-is (not base64)');
     }
+  } else {
+    privateKey = privateKey.replace(/\\n/g, '\n');
   }
 
-  const config: AppStoreConfig = {
-    keyId: (process.env.APPLE_KEY_ID || '').trim(),
-    issuerId: (process.env.APPLE_ISSUER_ID || '').trim(),
+  return {
+    keyId: readEnv('ASC_KEY_ID', 'APPLE_KEY_ID'),
+    issuerId: readEnv('ASC_ISSUER_ID', 'APPLE_ISSUER_ID'),
     privateKey: privateKey.trim(),
-    bundleId: (process.env.APPLE_BUNDLE_ID || '').trim(),
-    appStoreId: process.env.APPLE_APP_STORE_ID?.trim(),
+    bundleId: readEnv('ASC_BUNDLE_ID', 'APPLE_BUNDLE_ID'),
+    appStoreId: readEnv('ASC_APP_STORE_ID', 'APPLE_APP_STORE_ID') || undefined,
   };
-
-  console.log('📱 Apple Store Connect Config:');
-  console.log('  Key ID:', config.keyId);
-  console.log('  Issuer ID:', config.issuerId);
-  console.log('  Bundle ID:', config.bundleId);
-  console.log('  Private Key:', privateKey ? 'Loaded' : 'Missing');
-  
-  return config;
 }
 
 /**
@@ -846,69 +836,37 @@ ${details.secondarySubcategoryTwo ? `• Secondary Subcategory 2: ${details.seco
 }
 
 /**
- * Start the MCP server with dual transport support (STDIO + HTTP)
+ * Start the MCP server over stdio (local, single-tenant).
  */
 async function main() {
-  console.log('🚀 Starting Apple Store Connect MCP Server...');
-  
-  // Validate required environment variables
-  const requiredEnvVars = ['APPLE_KEY_ID', 'APPLE_ISSUER_ID', 'APPLE_PRIVATE_KEY', 'APPLE_BUNDLE_ID'];
-  const missing = requiredEnvVars.filter(envVar => !process.env[envVar]);
-  
+  // Only the signing credentials are required. bundleId is optional — this server
+  // manages many apps, so it is not tied to a single bundle.
+  const config = getAppStoreConfig();
+  const required: Array<[keyof AppStoreConfig, string]> = [
+    ['keyId', 'ASC_KEY_ID'],
+    ['issuerId', 'ASC_ISSUER_ID'],
+    ['privateKey', 'ASC_PRIVATE_KEY'],
+  ];
+  const missing = required.filter(([k]) => !config[k]).map(([, name]) => name);
   if (missing.length > 0) {
-    console.error('❌ Missing required environment variables:', missing);
+    console.error('❌ Missing required credentials:', missing.join(', '));
     process.exit(1);
   }
 
-  // Create HTTP transport with OAuth (like KMSmcp)
-  console.log('🌐 Starting HTTP transport...');
-  const httpTransport = new HttpTransport({
-    port: parseInt(process.env.PORT || '3001', 10),
-    host: process.env.HOST || '0.0.0.0',
-    cors: {
-      origin: process.env.CORS_ORIGIN || '*',
-      credentials: true,
-    },
-    oauth: process.env.OAUTH_ENABLED === 'true' ? {
-      enabled: true,
-      issuer: process.env.STYTCH_PROJECT_DOMAIN || 'https://test.stytch.com',
-      audience: process.env.STYTCH_PROJECT_ID || 'default-audience',
-      jwksUri: process.env.STYTCH_JWKS_URI || `${process.env.STYTCH_PROJECT_DOMAIN || 'https://test.stytch.com'}/.well-known/jwks.json`,
-    } : undefined,
-  });
+  const server = createMcpServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('✅ App Store Connect MCP server running on stdio');
 
-  // Set MCP server factory for HTTP transport
-  httpTransport.setMcpServerFactory(() => createMcpServer());
-
-  try {
-    await httpTransport.start();
-    console.log('✅ Apple Store Connect MCP Server is running!');
-    console.log(`📱 Bundle ID: ${process.env.APPLE_BUNDLE_ID || 'Not configured'}`);
-    console.log(`🔑 OAuth Authentication: ${process.env.OAUTH_ENABLED === 'true' ? 'Enabled' : 'Disabled'}`);
-    if (process.env.OAUTH_ENABLED === 'true') {
-      console.log(`🔐 OAuth Issuer: ${process.env.STYTCH_PROJECT_DOMAIN || 'https://test.stytch.com'}`);
-      console.log(`👥 OAuth Audience: ${process.env.STYTCH_PROJECT_ID}`);
-    }
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
-
-  // Handle graceful shutdown
-  process.on('SIGINT', async () => {
-    console.log('\n🔌 Shutting down gracefully...');
-    await httpTransport.stop();
+  const shutdown = async () => {
+    await server.close().catch(() => {});
     process.exit(0);
-  });
-
-  process.on('SIGTERM', async () => {
-    console.log('\n🔌 Shutting down gracefully...');
-    await httpTransport.stop();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
-// Start the server if this file is run directly
+// Start the server if this file is run directly.
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((error) => {
     console.error('💥 Server crashed:', error);

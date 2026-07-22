@@ -3,8 +3,7 @@ node_modules/
 .pnp
 .pnp.js
 
-# Build outputs
-dist/
+# Build outputs (dist/ is intentionally committed so `npx github:` works without a build step)
 build/
 *.tsbuildinfo
 
