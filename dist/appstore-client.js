@@ -3,6 +3,7 @@
  * Real implementation using Apple's App Store Connect API
  */
 import jwt from 'jsonwebtoken';
+import { gunzipSync } from 'node:zlib';
 export class AppStoreConnectClient {
     config;
     baseUrl = 'https://api.appstoreconnect.apple.com';
@@ -84,6 +85,64 @@ export class AppStoreConnectClient {
         }
         return response.json();
     }
+    // In-process cache of bundleId -> numeric app id.
+    appIdCache = new Map();
+    /**
+     * Resolve a bundle ID (e.g. "eu.ecofactor") to Apple's numeric app ID.
+     * Numeric IDs are returned unchanged; lookups are cached per process.
+     */
+    async resolveAppId(appIdOrBundleId) {
+        const value = (appIdOrBundleId || '').trim();
+        if (/^\d+$/.test(value))
+            return value;
+        const cached = this.appIdCache.get(value);
+        if (cached)
+            return cached;
+        const data = await this.makeRequest(`/v1/apps?filter[bundleId]=${encodeURIComponent(value)}&limit=1`);
+        const resolved = data.data?.[0]?.id;
+        if (!resolved) {
+            throw new Error(`No app found for bundle ID "${value}". Pass the numeric App Store app ID or a valid bundle ID.`);
+        }
+        this.appIdCache.set(value, resolved);
+        return resolved;
+    }
+    /**
+     * Make an authenticated request that returns raw bytes (e.g. gzipped report files).
+     */
+    async makeRawRequest(endpoint) {
+        const token = this.generateToken();
+        const response = await fetch(`${this.baseUrl}${endpoint}`, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/a-gzip, application/json',
+            },
+        });
+        if (!response.ok) {
+            const errorText = await response.text();
+            let detail = errorText;
+            try {
+                detail = JSON.parse(errorText).errors?.[0]?.detail || detail;
+            }
+            catch { /* not JSON */ }
+            throw new Error(`App Store API error: ${response.status} - ${detail}`);
+        }
+        return Buffer.from(await response.arrayBuffer());
+    }
+    /**
+     * Parse a tab-separated report (Apple sales reports) into row objects keyed by header.
+     */
+    parseTsv(tsv) {
+        const lines = tsv.split('\n').filter((line) => line.trim().length > 0);
+        if (lines.length < 2)
+            return [];
+        const headers = lines[0].split('\t').map((h) => h.trim());
+        return lines.slice(1).map((line) => {
+            const cells = line.split('\t');
+            const row = {};
+            headers.forEach((h, i) => { row[h] = (cells[i] ?? '').trim(); });
+            return row;
+        });
+    }
     /**
      * List all apps in App Store Connect
      */
@@ -109,6 +168,7 @@ export class AppStoreConnectClient {
      */
     async getAppInfo(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const data = await this.makeRequest(`/v1/apps/${appId}`);
             const app = data.data;
             if (!app)
@@ -133,21 +193,36 @@ export class AppStoreConnectClient {
      */
     async getSalesData(date) {
         const targetDate = date || new Date().toISOString().split('T')[0];
+        if (!this.config.vendorNumber) {
+            throw new Error('Sales reports require a vendor number. Set ASC_VENDOR_NUMBER (App Store Connect → Payments and Financial Reports → the number shown next to your legal entity).');
+        }
         try {
-            const endpoint = `/v1/salesReports?filter[frequency]=DAILY&filter[reportDate]=${targetDate}&filter[reportType]=SALES&filter[vendorNumber]=${this.config.issuerId}`;
-            const data = await this.makeRequest(endpoint);
-            // Calculate totals from sales report
-            const totalRevenue = data.data?.reduce((sum, item) => {
-                return sum + (parseFloat(item.attributes?.proceeds || 0));
-            }, 0) || 0;
-            const totalUnits = data.data?.reduce((sum, item) => {
-                return sum + (parseInt(item.attributes?.units || 0));
-            }, 0) || 0;
+            // Sales reports are returned as a gzipped TSV file, not JSON. reportSubType and
+            // version are required by Apple; vendorNumber is distinct from the issuer ID.
+            const params = new URLSearchParams({
+                'filter[frequency]': 'DAILY',
+                'filter[reportDate]': targetDate,
+                'filter[reportType]': 'SALES',
+                'filter[reportSubType]': 'SUMMARY',
+                'filter[vendorNumber]': this.config.vendorNumber,
+                'filter[version]': '1_1',
+            });
+            const buffer = await this.makeRawRequest(`/v1/salesReports?${params.toString()}`);
+            const rows = this.parseTsv(gunzipSync(buffer).toString('utf-8'));
+            // "Developer Proceeds" is per-unit, so total proceeds = units * per-unit proceeds.
+            let totalUnits = 0;
+            let totalRevenue = 0;
+            for (const row of rows) {
+                const units = parseInt(row['Units'] || '0', 10) || 0;
+                const perUnit = parseFloat(row['Developer Proceeds'] || '0') || 0;
+                totalUnits += units;
+                totalRevenue += units * perUnit;
+            }
             return {
                 date: targetDate,
                 revenue: totalRevenue,
-                currency: 'USD',
-                transactionCount: data.data?.length || 0,
+                currency: rows[0]?.['Currency of Proceeds'] || 'USD',
+                transactionCount: rows.length,
                 units: totalUnits,
             };
         }
@@ -161,6 +236,7 @@ export class AppStoreConnectClient {
      */
     async getAnalytics(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             // Note: Analytics API might require different endpoints or permissions
             const endpoint = `/v1/apps/${appId}/analyticsReportRequests`;
             return await this.makeRequest(endpoint);
@@ -175,6 +251,7 @@ export class AppStoreConnectClient {
      */
     async getBuilds(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const endpoint = `/v1/apps/${appId}/builds`;
             const data = await this.makeRequest(endpoint);
             return data.data?.map((build) => ({
@@ -195,6 +272,7 @@ export class AppStoreConnectClient {
      */
     async listAppStoreVersions(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const endpoint = `/v1/apps/${appId}/appStoreVersions`;
             const response = await this.makeRequest(endpoint);
             return response.data?.map((version) => ({
@@ -218,6 +296,7 @@ export class AppStoreConnectClient {
      */
     async listBetaGroups(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const endpoint = `/v1/apps/${appId}/betaGroups`;
             const response = await this.makeRequest(endpoint);
             return response.data?.map((group) => ({
@@ -241,7 +320,8 @@ export class AppStoreConnectClient {
      */
     async addTesterToBetaGroup(params) {
         try {
-            // First, create or get the beta tester
+            // Apple requires a betaGroups (or builds) relationship when creating a betaTester,
+            // so the group is attached in the same POST that creates the tester.
             const testerBody = {
                 data: {
                     type: 'betaTesters',
@@ -249,7 +329,12 @@ export class AppStoreConnectClient {
                         email: params.email,
                         firstName: params.firstName,
                         lastName: params.lastName,
-                    }
+                    },
+                    relationships: {
+                        betaGroups: {
+                            data: [{ type: 'betaGroups', id: params.groupId }],
+                        },
+                    },
                 }
             };
             let testerId;
@@ -261,28 +346,19 @@ export class AppStoreConnectClient {
                 testerId = testerResponse.data.id;
             }
             catch (error) {
-                // If tester already exists, find them
-                const existingTesters = await this.makeRequest(`/v1/betaTesters?filter[email]=${params.email}`);
+                // Tester already exists — look them up and attach to the group directly.
+                const existingTesters = await this.makeRequest(`/v1/betaTesters?filter[email]=${encodeURIComponent(params.email)}`);
                 if (existingTesters.data && existingTesters.data.length > 0) {
                     testerId = existingTesters.data[0].id;
+                    await this.makeRequest(`/v1/betaGroups/${params.groupId}/relationships/betaTesters`, {
+                        method: 'POST',
+                        body: { data: [{ type: 'betaTesters', id: testerId }] }
+                    });
                 }
                 else {
                     throw error;
                 }
             }
-            // Add tester to group
-            const addToGroupBody = {
-                data: [
-                    {
-                        type: 'betaTesters',
-                        id: testerId
-                    }
-                ]
-            };
-            await this.makeRequest(`/v1/betaGroups/${params.groupId}/relationships/betaTesters`, {
-                method: 'POST',
-                body: addToGroupBody
-            });
             return {
                 success: true,
                 testerId,
@@ -386,6 +462,7 @@ export class AppStoreConnectClient {
      */
     async createAppStoreVersion(params) {
         try {
+            const appId = await this.resolveAppId(params.appId);
             const body = {
                 data: {
                     type: 'appStoreVersions',
@@ -441,6 +518,7 @@ export class AppStoreConnectClient {
      */
     async getCustomerReviews(appId, limit = 50) {
         try {
+            appId = await this.resolveAppId(appId);
             const data = await this.makeRequest(`/v1/apps/${appId}/customerReviews?limit=${limit}&sort=-createdDate`);
             return data.data?.map((review) => ({
                 id: review.id,
@@ -463,6 +541,7 @@ export class AppStoreConnectClient {
      */
     async getAppPricing(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const data = await this.makeRequest(`/v1/apps/${appId}/appPriceSchedule`);
             if (!data.data)
                 return null;
@@ -487,6 +566,7 @@ export class AppStoreConnectClient {
      */
     async getInAppPurchases(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const data = await this.makeRequest(`/v1/apps/${appId}/inAppPurchasesV2?limit=200`);
             return data.data?.map((iap) => ({
                 id: iap.id,
@@ -510,6 +590,7 @@ export class AppStoreConnectClient {
      */
     async getAppAvailability(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const data = await this.makeRequest(`/v1/apps/${appId}/appAvailabilityV2`);
             if (!data.data)
                 return null;
@@ -529,6 +610,7 @@ export class AppStoreConnectClient {
      */
     async getAppInfoDetails(appId) {
         try {
+            appId = await this.resolveAppId(appId);
             const data = await this.makeRequest(`/v1/apps/${appId}/appInfos`);
             if (!data.data?.[0])
                 return null;

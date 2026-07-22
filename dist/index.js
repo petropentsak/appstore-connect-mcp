@@ -49,6 +49,7 @@ function getAppStoreConfig() {
         privateKey: privateKey.trim(),
         bundleId: readEnv('ASC_BUNDLE_ID', 'APPLE_BUNDLE_ID'),
         appStoreId: readEnv('ASC_APP_STORE_ID', 'APPLE_APP_STORE_ID') || undefined,
+        vendorNumber: readEnv('ASC_VENDOR_NUMBER', 'APPLE_VENDOR_NUMBER') || undefined,
     };
 }
 /**

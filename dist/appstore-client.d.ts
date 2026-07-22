@@ -8,6 +8,7 @@ export interface AppStoreConfig {
     privateKey: string;
     bundleId: string;
     appStoreId?: string;
+    vendorNumber?: string;
 }
 export interface AppInfo {
     id: string;
@@ -47,6 +48,20 @@ export declare class AppStoreConnectClient {
      * Make authenticated request to App Store Connect API
      */
     private makeRequest;
+    private appIdCache;
+    /**
+     * Resolve a bundle ID (e.g. "eu.ecofactor") to Apple's numeric app ID.
+     * Numeric IDs are returned unchanged; lookups are cached per process.
+     */
+    private resolveAppId;
+    /**
+     * Make an authenticated request that returns raw bytes (e.g. gzipped report files).
+     */
+    private makeRawRequest;
+    /**
+     * Parse a tab-separated report (Apple sales reports) into row objects keyed by header.
+     */
+    private parseTsv;
     /**
      * List all apps in App Store Connect
      */
