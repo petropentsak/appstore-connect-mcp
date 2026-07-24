@@ -4,6 +4,9 @@
  */
 import jwt from 'jsonwebtoken';
 import { gunzipSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 export class AppStoreConnectClient {
     config;
     baseUrl = 'https://api.appstoreconnect.apple.com';
@@ -83,7 +86,11 @@ export class AppStoreConnectClient {
                 throw new Error(`App Store API error: ${response.status} ${response.statusText} - ${errorText}`);
             }
         }
-        return response.json();
+        // DELETE and relationship updates return 204 with no body — don't attempt to parse it.
+        if (response.status === 204)
+            return null;
+        const text = await response.text();
+        return text ? JSON.parse(text) : null;
     }
     // In-process cache of bundleId -> numeric app id.
     appIdCache = new Map();
@@ -735,6 +742,427 @@ export class AppStoreConnectClient {
         catch (error) {
             console.error('Error getting app info details:', error);
             throw new Error(`Failed to get app info details: ${error.message}`);
+        }
+    }
+    /**
+     * Resolve an App Store version ID for an app. If versionString is given, match it exactly;
+     * otherwise pick the first version in one of the preferred states, else the most recently
+     * created version. Returns id + versionString + state for messaging.
+     */
+    async resolveVersionId(appId, versionString, preferredStates) {
+        const versions = await this.listAppStoreVersions(appId);
+        if (versions.length === 0)
+            throw new Error('No App Store versions found for this app.');
+        if (versionString) {
+            const match = versions.find((v) => v.versionString === versionString);
+            if (!match)
+                throw new Error(`No App Store version "${versionString}" found for this app.`);
+            return { id: match.id, versionString: match.versionString, state: match.appStoreState };
+        }
+        if (preferredStates && preferredStates.length > 0) {
+            const match = versions.find((v) => preferredStates.includes(v.appStoreState));
+            if (!match) {
+                throw new Error(`No App Store version in state ${preferredStates.join('/')} found. Pass versionString explicitly.`);
+            }
+            return { id: match.id, versionString: match.versionString, state: match.appStoreState };
+        }
+        const latest = versions
+            .slice()
+            .sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''))[0];
+        return { id: latest.id, versionString: latest.versionString, state: latest.appStoreState };
+    }
+    /**
+     * Release an approved version that is waiting for manual developer release. Resolves the
+     * version in PENDING_DEVELOPER_RELEASE when versionString is omitted.
+     */
+    async releaseVersion(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            const version = await this.resolveVersionId(appId, params.versionString, [
+                'PENDING_DEVELOPER_RELEASE',
+            ]);
+            const response = await this.makeRequest('/v1/appStoreVersionReleaseRequests', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'appStoreVersionReleaseRequests',
+                        relationships: {
+                            appStoreVersion: { data: { type: 'appStoreVersions', id: version.id } },
+                        },
+                    },
+                },
+            });
+            return { versionString: version.versionString, releaseRequestId: response.data.id };
+        }
+        catch (error) {
+            console.error('Error releasing version:', error);
+            throw new Error(`Failed to release version: ${error.message}`);
+        }
+    }
+    /**
+     * Control the iOS 7-day phased release for a version. action get returns the current state;
+     * start creates an ACTIVE phased release (or re-activates an existing one); pause/resume/complete
+     * PATCH the state to PAUSED/ACTIVE/COMPLETE.
+     */
+    async managePhasedRelease(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            const version = await this.resolveVersionId(appId, params.versionString);
+            const current = await this.makeRequest(`/v1/appStoreVersions/${version.id}/appStoreVersionPhasedRelease`);
+            const existing = current?.data;
+            if (params.action === 'get') {
+                return {
+                    versionString: version.versionString,
+                    action: 'get',
+                    id: existing?.id,
+                    state: existing?.attributes?.phasedReleaseState || 'NONE',
+                };
+            }
+            if (params.action === 'start') {
+                if (existing) {
+                    const resp = await this.makeRequest(`/v1/appStoreVersionPhasedReleases/${existing.id}`, {
+                        method: 'PATCH',
+                        body: {
+                            data: {
+                                id: existing.id,
+                                type: 'appStoreVersionPhasedReleases',
+                                attributes: { phasedReleaseState: 'ACTIVE' },
+                            },
+                        },
+                    });
+                    return {
+                        versionString: version.versionString,
+                        action: 'start',
+                        id: resp.data.id,
+                        state: resp.data.attributes?.phasedReleaseState,
+                    };
+                }
+                const resp = await this.makeRequest('/v1/appStoreVersionPhasedReleases', {
+                    method: 'POST',
+                    body: {
+                        data: {
+                            type: 'appStoreVersionPhasedReleases',
+                            attributes: { phasedReleaseState: 'ACTIVE' },
+                            relationships: {
+                                appStoreVersion: { data: { type: 'appStoreVersions', id: version.id } },
+                            },
+                        },
+                    },
+                });
+                return {
+                    versionString: version.versionString,
+                    action: 'start',
+                    id: resp.data.id,
+                    state: resp.data.attributes?.phasedReleaseState,
+                };
+            }
+            if (!existing) {
+                throw new Error(`No phased release exists for version ${version.versionString}. Use action "start" first.`);
+            }
+            const stateMap = { pause: 'PAUSED', resume: 'ACTIVE', complete: 'COMPLETE' };
+            const newState = stateMap[params.action];
+            const resp = await this.makeRequest(`/v1/appStoreVersionPhasedReleases/${existing.id}`, {
+                method: 'PATCH',
+                body: {
+                    data: {
+                        id: existing.id,
+                        type: 'appStoreVersionPhasedReleases',
+                        attributes: { phasedReleaseState: newState },
+                    },
+                },
+            });
+            return {
+                versionString: version.versionString,
+                action: params.action,
+                id: existing.id,
+                state: resp.data.attributes?.phasedReleaseState || newState,
+            };
+        }
+        catch (error) {
+            console.error('Error managing phased release:', error);
+            throw new Error(`Failed to manage phased release: ${error.message}`);
+        }
+    }
+    /**
+     * Post (or replace) the developer response to a customer review. Apple limits the response
+     * body to 5970 characters.
+     */
+    async replyToReview(params) {
+        try {
+            if (params.responseBody.length > 5970) {
+                throw new Error(`Response body is ${params.responseBody.length} chars; Apple allows a maximum of 5970.`);
+            }
+            const response = await this.makeRequest('/v1/customerReviewResponses', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'customerReviewResponses',
+                        attributes: { responseBody: params.responseBody },
+                        relationships: {
+                            review: { data: { type: 'customerReviews', id: params.reviewId } },
+                        },
+                    },
+                },
+            });
+            return { responseId: response.data.id };
+        }
+        catch (error) {
+            console.error('Error replying to review:', error);
+            throw new Error(`Failed to reply to review: ${error.message}`);
+        }
+    }
+    /**
+     * Get the existing developer response for a customer review (null if none).
+     */
+    async getReviewResponse(reviewId) {
+        try {
+            const data = await this.makeRequest(`/v1/customerReviews/${reviewId}/response`);
+            if (!data?.data)
+                return null;
+            return {
+                id: data.data.id,
+                responseBody: data.data.attributes?.responseBody,
+                state: data.data.attributes?.state,
+                lastModifiedDate: data.data.attributes?.lastModifiedDate,
+            };
+        }
+        catch (error) {
+            console.error('Error getting review response:', error);
+            throw new Error(`Failed to get review response: ${error.message}`);
+        }
+    }
+    /**
+     * Delete a developer response to a customer review.
+     */
+    async deleteReviewResponse(responseId) {
+        try {
+            await this.makeRequest(`/v1/customerReviewResponses/${responseId}`, { method: 'DELETE' });
+            return { deleted: true };
+        }
+        catch (error) {
+            console.error('Error deleting review response:', error);
+            throw new Error(`Failed to delete review response: ${error.message}`);
+        }
+    }
+    /**
+     * Set the TestFlight "what to test" text for a build + locale. Updates the existing
+     * betaBuildLocalization when present, otherwise creates one.
+     */
+    async setBetaWhatsNew(params) {
+        try {
+            const existing = await this.makeRequest(`/v1/betaBuildLocalizations?filter[build]=${encodeURIComponent(params.buildId)}&filter[locale]=${encodeURIComponent(params.locale)}`);
+            const found = existing?.data?.[0];
+            if (found) {
+                const resp = await this.makeRequest(`/v1/betaBuildLocalizations/${found.id}`, {
+                    method: 'PATCH',
+                    body: {
+                        data: {
+                            id: found.id,
+                            type: 'betaBuildLocalizations',
+                            attributes: { whatsNew: params.whatsNew },
+                        },
+                    },
+                });
+                return { id: resp.data.id, locale: params.locale, created: false };
+            }
+            const resp = await this.makeRequest('/v1/betaBuildLocalizations', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'betaBuildLocalizations',
+                        attributes: { locale: params.locale, whatsNew: params.whatsNew },
+                        relationships: {
+                            build: { data: { type: 'builds', id: params.buildId } },
+                        },
+                    },
+                },
+            });
+            return { id: resp.data.id, locale: params.locale, created: true };
+        }
+        catch (error) {
+            console.error('Error setting beta whats new:', error);
+            throw new Error(`Failed to set beta what's new: ${error.message}`);
+        }
+    }
+    /**
+     * Submit a build for TestFlight (beta) app review.
+     */
+    async submitBuildForBetaReview(buildId) {
+        try {
+            const response = await this.makeRequest('/v1/betaAppReviewSubmissions', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'betaAppReviewSubmissions',
+                        relationships: { build: { data: { type: 'builds', id: buildId } } },
+                    },
+                },
+            });
+            return { submissionId: response.data.id, state: response.data.attributes?.betaReviewState };
+        }
+        catch (error) {
+            console.error('Error submitting build for beta review:', error);
+            throw new Error(`Failed to submit build for beta review: ${error.message}`);
+        }
+    }
+    /**
+     * Mark a TestFlight build as expired.
+     */
+    async expireBuild(buildId) {
+        try {
+            const response = await this.makeRequest(`/v1/builds/${buildId}`, {
+                method: 'PATCH',
+                body: { data: { id: buildId, type: 'builds', attributes: { expired: true } } },
+            });
+            return { buildId, expired: response?.data?.attributes?.expired ?? true };
+        }
+        catch (error) {
+            console.error('Error expiring build:', error);
+            throw new Error(`Failed to expire build: ${error.message}`);
+        }
+    }
+    /**
+     * Get available app price points for an app in a territory. Returns the price point id plus
+     * customer price and developer proceeds — the id feeds update_price_schedule.
+     */
+    async getAppPricePoints(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            const data = await this.makeRequest(`/v1/apps/${appId}/appPricePoints?filter[territory]=${encodeURIComponent(params.territory)}&limit=200`);
+            return (data?.data ?? []).map((pp) => ({
+                id: pp.id,
+                customerPrice: pp.attributes?.customerPrice,
+                proceeds: pp.attributes?.proceeds,
+            }));
+        }
+        catch (error) {
+            console.error('Error getting app price points:', error);
+            throw new Error(`Failed to get app price points: ${error.message}`);
+        }
+    }
+    /**
+     * Set an app's price by creating a new appPriceSchedule pinned to a price point in a base
+     * territory. Uses the modern (2023+) pricing API.
+     * NOTE: this pricing API shape is intricate and needs live verification against a real account.
+     */
+    async updatePriceSchedule(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            const response = await this.makeRequest('/v1/appPriceSchedules', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'appPriceSchedules',
+                        relationships: {
+                            app: { data: { type: 'apps', id: appId } },
+                            baseTerritory: { data: { type: 'territories', id: params.territory } },
+                            manualPrices: { data: [{ type: 'appPrices', id: params.pricePointId }] },
+                        },
+                    },
+                    included: [
+                        {
+                            type: 'appPrices',
+                            id: params.pricePointId,
+                            attributes: {},
+                            relationships: {
+                                appPricePoint: { data: { type: 'appPricePoints', id: params.pricePointId } },
+                            },
+                        },
+                    ],
+                },
+            });
+            return { scheduleId: response.data.id };
+        }
+        catch (error) {
+            console.error('Error updating price schedule:', error);
+            throw new Error(`Failed to update price schedule: ${error.message}`);
+        }
+    }
+    /**
+     * Set an app's territory availability via the v2 appAvailabilities API.
+     * NOTE: the v2 appAvailabilities shape needs live verification against a real account.
+     */
+    async setAppAvailability(params) {
+        try {
+            const appId = await this.resolveAppId(params.appId);
+            const response = await this.makeRequest('/v2/appAvailabilities', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'appAvailabilities',
+                        attributes: { availableInNewTerritories: params.availableInNewTerritories ?? false },
+                        relationships: {
+                            app: { data: { type: 'apps', id: appId } },
+                            territoryAvailabilities: {
+                                data: params.territories.map((id) => ({ type: 'territoryAvailabilities', id })),
+                            },
+                        },
+                    },
+                },
+            });
+            return { availabilityId: response.data.id };
+        }
+        catch (error) {
+            console.error('Error setting app availability:', error);
+            throw new Error(`Failed to set app availability: ${error.message}`);
+        }
+    }
+    /**
+     * Upload a single screenshot to an app screenshot set: reserve the asset, upload each byte
+     * range to the pre-signed URLs, then commit with the file's MD5 checksum.
+     * NOTE: the reserve/upload/commit flow needs live verification against a real account.
+     */
+    async uploadScreenshot(params) {
+        try {
+            const fileBuffer = readFileSync(params.filePath);
+            const fileName = basename(params.filePath);
+            const fileSize = fileBuffer.length;
+            // Reserve the screenshot asset — Apple returns the upload operations to perform.
+            const reserve = await this.makeRequest('/v1/appScreenshots', {
+                method: 'POST',
+                body: {
+                    data: {
+                        type: 'appScreenshots',
+                        attributes: { fileName, fileSize },
+                        relationships: {
+                            appScreenshotSet: {
+                                data: { type: 'appScreenshotSets', id: params.screenshotSetId },
+                            },
+                        },
+                    },
+                },
+            });
+            const screenshotId = reserve.data.id;
+            const operations = reserve.data.attributes?.uploadOperations || [];
+            // Each operation is a pre-signed URL for one byte range — raw fetch, no JWT.
+            for (const op of operations) {
+                const slice = fileBuffer.subarray(op.offset, op.offset + op.length);
+                const headers = {};
+                for (const h of op.requestHeaders || [])
+                    headers[h.name] = h.value;
+                const uploadResp = await fetch(op.url, { method: op.method, headers, body: slice });
+                if (!uploadResp.ok) {
+                    const errText = await uploadResp.text();
+                    throw new Error(`Screenshot chunk upload failed: ${uploadResp.status} - ${errText}`);
+                }
+            }
+            // Commit: mark uploaded and supply the full-file MD5 checksum.
+            const checksum = createHash('md5').update(fileBuffer).digest('hex');
+            await this.makeRequest(`/v1/appScreenshots/${screenshotId}`, {
+                method: 'PATCH',
+                body: {
+                    data: {
+                        id: screenshotId,
+                        type: 'appScreenshots',
+                        attributes: { uploaded: true, sourceFileChecksum: checksum },
+                    },
+                },
+            });
+            return { id: screenshotId, fileName, fileSize };
+        }
+        catch (error) {
+            console.error('Error uploading screenshot:', error);
+            throw new Error(`Failed to upload screenshot: ${error.message}`);
         }
     }
 }

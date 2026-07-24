@@ -179,4 +179,136 @@ export declare class AppStoreConnectClient {
      * Get app info details including categories and age rating
      */
     getAppInfoDetails(appId: string): Promise<any>;
+    /**
+     * Resolve an App Store version ID for an app. If versionString is given, match it exactly;
+     * otherwise pick the first version in one of the preferred states, else the most recently
+     * created version. Returns id + versionString + state for messaging.
+     */
+    private resolveVersionId;
+    /**
+     * Release an approved version that is waiting for manual developer release. Resolves the
+     * version in PENDING_DEVELOPER_RELEASE when versionString is omitted.
+     */
+    releaseVersion(params: {
+        appId: string;
+        versionString?: string;
+    }): Promise<{
+        versionString: string;
+        releaseRequestId: string;
+    }>;
+    /**
+     * Control the iOS 7-day phased release for a version. action get returns the current state;
+     * start creates an ACTIVE phased release (or re-activates an existing one); pause/resume/complete
+     * PATCH the state to PAUSED/ACTIVE/COMPLETE.
+     */
+    managePhasedRelease(params: {
+        appId: string;
+        versionString?: string;
+        action: 'get' | 'start' | 'pause' | 'resume' | 'complete';
+    }): Promise<{
+        versionString: string;
+        action: string;
+        id?: string;
+        state?: string;
+    }>;
+    /**
+     * Post (or replace) the developer response to a customer review. Apple limits the response
+     * body to 5970 characters.
+     */
+    replyToReview(params: {
+        reviewId: string;
+        responseBody: string;
+    }): Promise<{
+        responseId: string;
+    }>;
+    /**
+     * Get the existing developer response for a customer review (null if none).
+     */
+    getReviewResponse(reviewId: string): Promise<{
+        id: string;
+        responseBody: string;
+        state?: string;
+        lastModifiedDate?: string;
+    } | null>;
+    /**
+     * Delete a developer response to a customer review.
+     */
+    deleteReviewResponse(responseId: string): Promise<{
+        deleted: true;
+    }>;
+    /**
+     * Set the TestFlight "what to test" text for a build + locale. Updates the existing
+     * betaBuildLocalization when present, otherwise creates one.
+     */
+    setBetaWhatsNew(params: {
+        buildId: string;
+        locale: string;
+        whatsNew: string;
+    }): Promise<{
+        id: string;
+        locale: string;
+        created: boolean;
+    }>;
+    /**
+     * Submit a build for TestFlight (beta) app review.
+     */
+    submitBuildForBetaReview(buildId: string): Promise<{
+        submissionId: string;
+        state?: string;
+    }>;
+    /**
+     * Mark a TestFlight build as expired.
+     */
+    expireBuild(buildId: string): Promise<{
+        buildId: string;
+        expired: boolean;
+    }>;
+    /**
+     * Get available app price points for an app in a territory. Returns the price point id plus
+     * customer price and developer proceeds — the id feeds update_price_schedule.
+     */
+    getAppPricePoints(params: {
+        appId: string;
+        territory: string;
+    }): Promise<Array<{
+        id: string;
+        customerPrice?: string;
+        proceeds?: string;
+    }>>;
+    /**
+     * Set an app's price by creating a new appPriceSchedule pinned to a price point in a base
+     * territory. Uses the modern (2023+) pricing API.
+     * NOTE: this pricing API shape is intricate and needs live verification against a real account.
+     */
+    updatePriceSchedule(params: {
+        appId: string;
+        territory: string;
+        pricePointId: string;
+    }): Promise<{
+        scheduleId: string;
+    }>;
+    /**
+     * Set an app's territory availability via the v2 appAvailabilities API.
+     * NOTE: the v2 appAvailabilities shape needs live verification against a real account.
+     */
+    setAppAvailability(params: {
+        appId: string;
+        territories: string[];
+        availableInNewTerritories?: boolean;
+    }): Promise<{
+        availabilityId: string;
+    }>;
+    /**
+     * Upload a single screenshot to an app screenshot set: reserve the asset, upload each byte
+     * range to the pre-signed URLs, then commit with the file's MD5 checksum.
+     * NOTE: the reserve/upload/commit flow needs live verification against a real account.
+     */
+    uploadScreenshot(params: {
+        screenshotSetId: string;
+        filePath: string;
+    }): Promise<{
+        id: string;
+        fileName: string;
+        fileSize: number;
+    }>;
 }

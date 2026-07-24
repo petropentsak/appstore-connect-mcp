@@ -58,7 +58,7 @@ function getAppStoreConfig() {
 function createMcpServer() {
     const server = new Server({
         name: 'appstore-connect-server',
-        version: '2.0.0',
+        version: '2.1.0',
     }, {
         capabilities: {
             tools: {},
@@ -382,6 +382,167 @@ function createMcpServer() {
                             },
                         },
                         required: ['appId'],
+                    },
+                },
+                {
+                    name: 'release_version',
+                    description: 'Release an approved App Store version that is waiting for manual developer release. Resolves the version in PENDING_DEVELOPER_RELEASE when versionString is omitted.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            versionString: {
+                                type: 'string',
+                                description: 'Version to release (optional; defaults to the one pending developer release)',
+                            },
+                        },
+                        required: ['appId'],
+                    },
+                },
+                {
+                    name: 'manage_phased_release',
+                    description: 'Control the iOS 7-day phased release for a version: get current state, start (ACTIVE), pause, resume, or complete (release to all users at once).',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            versionString: {
+                                type: 'string',
+                                description: 'Version to control (optional; defaults to the latest version)',
+                            },
+                            action: {
+                                type: 'string',
+                                description: 'Phased release action',
+                                enum: ['get', 'start', 'pause', 'resume', 'complete'],
+                            },
+                        },
+                        required: ['appId', 'action'],
+                    },
+                },
+                {
+                    name: 'reply_to_review',
+                    description: 'Post or replace the developer response to a customer review (max 5970 chars).',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            reviewId: { type: 'string', description: 'The customer review ID' },
+                            responseBody: { type: 'string', description: 'Response text (5970 chars max)' },
+                        },
+                        required: ['reviewId', 'responseBody'],
+                    },
+                },
+                {
+                    name: 'get_review_response',
+                    description: 'Get the existing developer response for a customer review.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            reviewId: { type: 'string', description: 'The customer review ID' },
+                        },
+                        required: ['reviewId'],
+                    },
+                },
+                {
+                    name: 'delete_review_response',
+                    description: 'Delete a developer response to a customer review.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            responseId: { type: 'string', description: 'The customer review response ID' },
+                        },
+                        required: ['responseId'],
+                    },
+                },
+                {
+                    name: 'set_beta_whats_new',
+                    description: 'Set the TestFlight "what to test" text for a build and locale.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            buildId: { type: 'string', description: 'The build ID' },
+                            locale: { type: 'string', description: 'Locale code (default "en-US")' },
+                            whatsNew: { type: 'string', description: 'What to test text' },
+                        },
+                        required: ['buildId', 'whatsNew'],
+                    },
+                },
+                {
+                    name: 'submit_build_for_beta_review',
+                    description: 'Submit a build for TestFlight (beta) app review.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            buildId: { type: 'string', description: 'The build ID' },
+                        },
+                        required: ['buildId'],
+                    },
+                },
+                {
+                    name: 'expire_build',
+                    description: 'Mark a TestFlight build as expired.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            buildId: { type: 'string', description: 'The build ID' },
+                        },
+                        required: ['buildId'],
+                    },
+                },
+                {
+                    name: 'get_app_price_points',
+                    description: 'Get available price points for an app in a territory (id + customer price + proceeds). The id feeds update_price_schedule.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            territory: { type: 'string', description: 'Territory code (default "USA")' },
+                        },
+                        required: ['appId'],
+                    },
+                },
+                {
+                    name: 'update_price_schedule',
+                    description: 'Set an app price by creating a new price schedule pinned to a price point in a base territory (modern pricing API).',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            territory: { type: 'string', description: 'Base territory code (e.g. "USA")' },
+                            pricePointId: { type: 'string', description: 'Price point ID from get_app_price_points' },
+                        },
+                        required: ['appId', 'territory', 'pricePointId'],
+                    },
+                },
+                {
+                    name: 'set_app_availability',
+                    description: 'Set an app\'s territory availability via the v2 appAvailabilities API.',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            appId: { type: 'string', description: 'Numeric app ID or bundle ID' },
+                            territories: {
+                                type: 'array',
+                                items: { type: 'string' },
+                                description: 'Territory codes the app should be available in',
+                            },
+                            availableInNewTerritories: {
+                                type: 'boolean',
+                                description: 'Whether to auto-enable future new territories (default false)',
+                            },
+                        },
+                        required: ['appId', 'territories'],
+                    },
+                },
+                {
+                    name: 'upload_screenshot',
+                    description: 'Upload one screenshot to an app screenshot set (reserve, upload byte ranges to pre-signed URLs, commit with MD5).',
+                    inputSchema: {
+                        type: 'object',
+                        properties: {
+                            screenshotSetId: { type: 'string', description: 'The app screenshot set ID' },
+                            filePath: { type: 'string', description: 'Absolute path to the screenshot file' },
+                        },
+                        required: ['screenshotSetId', 'filePath'],
                     },
                 },
             ],
@@ -762,6 +923,156 @@ ${details.secondarySubcategoryTwo ? `• Secondary Subcategory 2: ${details.seco
                             {
                                 type: 'text',
                                 text: `✅ Submitted version ${versionId} for App Store review${releaseType ? ` (${releaseType} release)` : ''}. Submission ID: ${r.submissionId}`,
+                            },
+                        ],
+                    };
+                }
+                case 'release_version': {
+                    const { appId, versionString } = args;
+                    const r = await appStoreClient.releaseVersion({ appId, versionString });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `🚀 Released version ${r.versionString}. Release request ID: ${r.releaseRequestId}`,
+                            },
+                        ],
+                    };
+                }
+                case 'manage_phased_release': {
+                    const { appId, versionString, action } = args;
+                    const r = await appStoreClient.managePhasedRelease({ appId, versionString, action });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: action === 'get'
+                                    ? `📶 Phased release for version ${r.versionString}: ${r.state}${r.id ? ` (id: ${r.id})` : ''}`
+                                    : `✅ Phased release for version ${r.versionString} — ${action} → ${r.state}${r.id ? ` (id: ${r.id})` : ''}`,
+                            },
+                        ],
+                    };
+                }
+                case 'reply_to_review': {
+                    const { reviewId, responseBody } = args;
+                    const r = await appStoreClient.replyToReview({ reviewId, responseBody });
+                    return {
+                        content: [
+                            { type: 'text', text: `✅ Replied to review ${reviewId}. Response ID: ${r.responseId}` },
+                        ],
+                    };
+                }
+                case 'get_review_response': {
+                    const { reviewId } = args;
+                    const r = await appStoreClient.getReviewResponse(reviewId);
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: r
+                                    ? `💬 Response to review ${reviewId} (${r.state || 'N/A'}):\n${r.responseBody}`
+                                    : `No developer response found for review ${reviewId}.`,
+                            },
+                        ],
+                    };
+                }
+                case 'delete_review_response': {
+                    const { responseId } = args;
+                    await appStoreClient.deleteReviewResponse(responseId);
+                    return {
+                        content: [{ type: 'text', text: `🗑️  Deleted review response ${responseId}.` }],
+                    };
+                }
+                case 'set_beta_whats_new': {
+                    const { buildId, locale, whatsNew } = args;
+                    const r = await appStoreClient.setBetaWhatsNew({
+                        buildId,
+                        locale: locale || 'en-US',
+                        whatsNew,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `✅ ${r.created ? 'Created' : 'Updated'} TestFlight "what to test" for build ${buildId} (${r.locale}). Localization ID: ${r.id}`,
+                            },
+                        ],
+                    };
+                }
+                case 'submit_build_for_beta_review': {
+                    const { buildId } = args;
+                    const r = await appStoreClient.submitBuildForBetaReview(buildId);
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `✅ Submitted build ${buildId} for TestFlight beta review${r.state ? ` (${r.state})` : ''}. Submission ID: ${r.submissionId}`,
+                            },
+                        ],
+                    };
+                }
+                case 'expire_build': {
+                    const { buildId } = args;
+                    const r = await appStoreClient.expireBuild(buildId);
+                    return {
+                        content: [{ type: 'text', text: `✅ Build ${r.buildId} marked expired.` }],
+                    };
+                }
+                case 'get_app_price_points': {
+                    const { appId, territory } = args;
+                    const points = await appStoreClient.getAppPricePoints({
+                        appId,
+                        territory: territory || 'USA',
+                    });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: points.length
+                                    ? `💵 Price points for app ${appId} (${territory || 'USA'}):\n\n${points
+                                        .map((p, i) => `${i + 1}. ${p.customerPrice ?? 'N/A'} (proceeds: ${p.proceeds ?? 'N/A'})\n   • ID: ${p.id}`)
+                                        .join('\n')}`
+                                    : `No price points found for app ${appId} in ${territory || 'USA'}.`,
+                            },
+                        ],
+                    };
+                }
+                case 'update_price_schedule': {
+                    const { appId, territory, pricePointId } = args;
+                    const r = await appStoreClient.updatePriceSchedule({ appId, territory, pricePointId });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `✅ Created price schedule for app ${appId} in ${territory} at price point ${pricePointId}. Schedule ID: ${r.scheduleId}`,
+                            },
+                        ],
+                    };
+                }
+                case 'set_app_availability': {
+                    const { appId, territories, availableInNewTerritories } = args;
+                    const r = await appStoreClient.setAppAvailability({
+                        appId,
+                        territories,
+                        availableInNewTerritories,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `✅ Set availability for app ${appId} in ${territories.length} territories. Availability ID: ${r.availabilityId}`,
+                            },
+                        ],
+                    };
+                }
+                case 'upload_screenshot': {
+                    const { screenshotSetId, filePath } = args;
+                    const r = await appStoreClient.uploadScreenshot({ screenshotSetId, filePath });
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: `🖼️  Uploaded ${r.fileName} (${r.fileSize} bytes) to set ${screenshotSetId}. Screenshot ID: ${r.id}`,
                             },
                         ],
                     };
