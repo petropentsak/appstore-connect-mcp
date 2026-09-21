@@ -14,7 +14,7 @@ Fork of [ryaker/appstore-connect-mcp](https://github.com/ryaker/appstore-connect
 
 > Known audit note: `@modelcontextprotocol/sdk` transitively pulls `@hono/node-server` (moderate advisory). It is only used by the SDK's HTTP/SSE transport, which this server never imports — it is not reachable in stdio mode.
 
-## Available tools (30)
+## Available tools (34)
 
 ### Apps & info
 
@@ -73,6 +73,26 @@ Fork of [ryaker/appstore-connect-mcp](https://github.com/ryaker/appstore-connect
 | Tool | Description | Key inputs |
 |------|-------------|------------|
 | `upload_screenshot` | Upload one screenshot to a screenshot set (reserve → upload → commit) | `screenshotSetId`, `filePath` |
+
+### Signing identity (bundle IDs, capabilities, profiles)
+
+| Tool | Description | Key inputs |
+|---|---|---|
+| `list_bundle_ids` | List bundle IDs with the capabilities enabled on each, mapped to the entitlement key every capability authorises | `identifier?`, `platform?` |
+| `get_bundle_id_capabilities` | Capabilities on one bundle ID with their entitlement keys | `bundleId` |
+| `list_profiles` | List provisioning profiles (type, state, UUID, expiry, bundle ID) | `bundleId?`, `profileType?`, `profileState?` |
+| `get_profile_entitlements` | Decode a profile and return the entitlements it authorises | `profileId?` or `bundleId?` |
+
+App records carry no entitlements in App Store Connect — capabilities live on the developer-portal
+bundle ID, and what a build may actually sign lives inside the provisioning profile. A capability is
+Apple's grant; the app still has to request the key in its `.entitlements` file. The two vocabularies
+differ (portal `CARPLAY_NAVIGATION` grants `com.apple.developer.carplay-maps`), so every capability is
+reported alongside the key it authorises.
+
+`get_profile_entitlements` decodes the profile's CMS blob in-process — same result as
+`security cms -D -i x.mobileprovision`, no shell-out, no macOS dependency. Identifier matching is done
+locally and exactly, because Apple's `filter[identifier]` is a partial match (`eu.ecofactor` also hits
+`eu.ecofactortr`).
 
 ### Analytics & sales
 

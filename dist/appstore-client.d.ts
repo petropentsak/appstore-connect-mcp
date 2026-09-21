@@ -36,6 +36,22 @@ export interface AppStoreVersion {
     copyright?: string;
     createdDate: string;
 }
+export declare function entitlementKeyFor(capabilityType: string): string | undefined;
+type PlistValue = string | number | boolean | PlistValue[] | {
+    [key: string]: PlistValue;
+};
+/**
+ * Minimal XML-plist parser — covers everything a provisioning profile contains
+ * (dict/array/string/bool/integer/real/date/data). <data> blobs (the embedded developer
+ * certificates) are summarised rather than returned, so output stays small.
+ */
+export declare function parsePlistXml(xml: string): PlistValue;
+/**
+ * A .mobileprovision / profileContent blob is a DER CMS SignedData wrapper around an XML
+ * plist. Rather than implement CMS, lift the plist out by its delimiters — the same result
+ * as `security cms -D`, with no shell-out and no OS dependency.
+ */
+export declare function decodeProvisioningProfile(profileContentBase64: string): Record<string, any>;
 export declare class AppStoreConnectClient {
     private config;
     private baseUrl;
@@ -54,6 +70,11 @@ export declare class AppStoreConnectClient {
      * Numeric IDs are returned unchanged; lookups are cached per process.
      */
     private resolveAppId;
+    /**
+     * Fetch every page of a collection endpoint, concatenating data and included resources.
+     * maxPages is a runaway guard, not a real limit — 200-per-page covers every collection here.
+     */
+    private makePaginatedRequest;
     /**
      * Make an authenticated request that returns raw bytes (e.g. gzipped report files).
      */
@@ -311,4 +332,89 @@ export declare class AppStoreConnectClient {
         fileName: string;
         fileSize: number;
     }>;
+    private bundleIdsCache?;
+    /**
+     * Fetch every bundle ID on the team with its enabled capabilities. Cached per process:
+     * portal capabilities change rarely and every lookup here needs the whole list anyway,
+     * because Apple's filter[identifier] is a PARTIAL match ("eu.ecofactor" also matches
+     * "eu.ecofactortr"), so identifiers are matched exactly on this side.
+     */
+    private fetchAllBundleIds;
+    /**
+     * Resolve a bundle identifier ("eu.ecofactor") or a portal resource id ("636AMV3G4A")
+     * to the full bundle-ID record. Exact match only.
+     */
+    private resolveBundleIdRef;
+    /**
+     * List bundle IDs with the capabilities enabled on each. identifier is a case-insensitive
+     * substring filter applied locally (see fetchAllBundleIds for why).
+     */
+    listBundleIds(params: {
+        identifier?: string;
+        platform?: string;
+    }): Promise<Array<{
+        id: string;
+        identifier: string;
+        name: string;
+        platform: string;
+        capabilities: Array<{
+            capabilityType: string;
+            entitlementKey?: string;
+            settings?: any;
+        }>;
+    }>>;
+    /**
+     * Capabilities enabled on one bundle ID, with the entitlement key each one authorises.
+     * A capability here is Apple's GRANT — the app still has to request the key in its
+     * .entitlements file for the build to claim it.
+     */
+    getBundleIdCapabilities(bundleId: string): Promise<{
+        id: string;
+        identifier: string;
+        name: string;
+        platform: string;
+        capabilities: Array<{
+            capabilityType: string;
+            entitlementKey?: string;
+            settings?: any;
+        }>;
+    }>;
+    /**
+     * List provisioning profiles. profileContent is excluded here (it is a large DER blob) —
+     * use getProfileEntitlements for the decoded entitlements of one profile.
+     */
+    listProfiles(params: {
+        bundleId?: string;
+        profileType?: string;
+        profileState?: string;
+        limit?: number;
+    }): Promise<Array<{
+        id: string;
+        name: string;
+        profileType: string;
+        profileState: string;
+        uuid: string;
+        expirationDate: string;
+        bundleIdentifier: string;
+    }>>;
+    /**
+     * Decode one provisioning profile and return the entitlements it actually authorises —
+     * the ground truth for "can this build sign that entitlement". Either pass profileId, or
+     * pass bundleId and let the newest non-expired profile of profileType be picked.
+     */
+    getProfileEntitlements(params: {
+        profileId?: string;
+        bundleId?: string;
+        profileType?: string;
+    }): Promise<{
+        id: string;
+        name: string;
+        uuid: string;
+        profileType: string;
+        profileState: string;
+        expirationDate: string;
+        bundleIdentifier: string;
+        entitlements: Record<string, any>;
+    }>;
 }
+export {};

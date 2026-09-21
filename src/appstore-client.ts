@@ -47,6 +47,176 @@ export interface AppStoreVersion {
   createdDate: string;
 }
 
+/**
+ * Developer-portal capability type -> the entitlement key it authorises in a provisioning
+ * profile. The two vocabularies do NOT match: the portal's CARPLAY_NAVIGATION grants
+ * com.apple.developer.carplay-maps, and several capabilities grant no key at all.
+ * Unmapped types resolve to undefined and are reported as unknown rather than guessed.
+ */
+const CAPABILITY_ENTITLEMENTS: Record<string, string> = {
+  ACCESS_WIFI_INFORMATION: 'com.apple.developer.networking.wifi-info',
+  APPLE_ID_AUTH: 'com.apple.developer.applesignin',
+  APPLE_PAY: 'com.apple.developer.in-app-payments',
+  APP_ATTEST: 'com.apple.developer.devicecheck.appattest-environment',
+  APP_GROUPS: 'com.apple.security.application-groups',
+  ASSOCIATED_DOMAINS: 'com.apple.developer.associated-domains',
+  AUTOFILL_CREDENTIAL_PROVIDER: 'com.apple.developer.authentication-services.autofill-credential-provider',
+  CARPLAY_AUDIO: 'com.apple.developer.carplay-audio',
+  CARPLAY_CHARGING: 'com.apple.developer.carplay-charging',
+  CARPLAY_COMMUNICATION: 'com.apple.developer.carplay-communication',
+  CARPLAY_DRIVING_TASK: 'com.apple.developer.carplay-driving-task',
+  CARPLAY_NAVIGATION: 'com.apple.developer.carplay-maps',
+  CARPLAY_PARKING: 'com.apple.developer.carplay-parking',
+  CARPLAY_QUICK_ORDERING: 'com.apple.developer.carplay-quick-ordering',
+  CLASSKIT: 'com.apple.developer.ClassKit-environment',
+  DATA_PROTECTION: 'com.apple.developer.default-data-protection',
+  GAME_CENTER: 'com.apple.developer.game-center',
+  HEALTHKIT: 'com.apple.developer.healthkit',
+  HOMEKIT: 'com.apple.developer.homekit',
+  HOT_SPOT: 'com.apple.developer.networking.HotspotConfiguration',
+  ICLOUD: 'com.apple.developer.icloud-container-identifiers',
+  INTER_APP_AUDIO: 'inter-app-audio',
+  MAPS: 'com.apple.developer.maps',
+  MULTIPATH: 'com.apple.developer.networking.multipath',
+  NETWORK_EXTENSIONS: 'com.apple.developer.networking.networkextension',
+  NFC_TAG_READING: 'com.apple.developer.nfc.readersession.formats',
+  PERSONAL_VPN: 'com.apple.developer.networking.vpn.api',
+  PUSH_NOTIFICATIONS: 'aps-environment',
+  SIRIKIT: 'com.apple.developer.siri',
+  SYSTEM_EXTENSION_INSTALL: 'com.apple.developer.system-extension.install',
+  USER_MANAGEMENT: 'com.apple.developer.user-management',
+  WALLET: 'com.apple.developer.pass-type-identifiers',
+  WIRELESS_ACCESSORY_CONFIGURATION: 'com.apple.external-accessory.wireless-configuration',
+  // Needs no entitlement key — StoreKit works from the portal grant alone.
+  IN_APP_PURCHASE: '',
+  COREMEDIA_HLS_LOW_LATENCY: '',
+};
+
+// undefined = this tool has no mapping for the type; '' = the type needs no entitlement key.
+export function entitlementKeyFor(capabilityType: string): string | undefined {
+  return CAPABILITY_ENTITLEMENTS[capabilityType];
+}
+
+type PlistValue = string | number | boolean | PlistValue[] | { [key: string]: PlistValue };
+
+/**
+ * Minimal XML-plist parser — covers everything a provisioning profile contains
+ * (dict/array/string/bool/integer/real/date/data). <data> blobs (the embedded developer
+ * certificates) are summarised rather than returned, so output stays small.
+ */
+export function parsePlistXml(xml: string): PlistValue {
+  let pos = 0;
+
+  const nextTag = (): { name: string; closing: boolean; selfClosing: boolean } | null => {
+    for (;;) {
+      const open = xml.indexOf('<', pos);
+      if (open === -1) return null;
+      if (xml.startsWith('<!--', open)) {
+        const commentEnd = xml.indexOf('-->', open);
+        pos = commentEnd === -1 ? xml.length : commentEnd + 3;
+        continue;
+      }
+      const close = xml.indexOf('>', open);
+      if (close === -1) return null;
+      const raw = xml.slice(open + 1, close);
+      pos = close + 1;
+      if (raw.startsWith('?') || raw.startsWith('!')) continue; // declaration / doctype
+      return {
+        name: raw.replace(/^\//, '').replace(/\/$/, '').trim().split(/\s+/)[0],
+        closing: raw.startsWith('/'),
+        selfClosing: raw.endsWith('/'),
+      };
+    }
+  };
+
+  // Text up to the next tag, then consume that tag (the element's closing tag).
+  const textUntilClose = (): string => {
+    const open = xml.indexOf('<', pos);
+    const raw = xml.slice(pos, open === -1 ? xml.length : open);
+    pos = open === -1 ? xml.length : open;
+    nextTag();
+    return raw
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&');
+  };
+
+  const readValue = (tag: { name: string; selfClosing: boolean }): PlistValue => {
+    switch (tag.name) {
+      case 'true':
+        return true;
+      case 'false':
+        return false;
+      case 'string':
+      case 'date':
+        return tag.selfClosing ? '' : textUntilClose();
+      case 'integer':
+      case 'real':
+        return tag.selfClosing ? 0 : Number(textUntilClose());
+      case 'data': {
+        const encoded = tag.selfClosing ? '' : textUntilClose();
+        const bytes = Buffer.from(encoded.replace(/\s+/g, ''), 'base64').length;
+        return `<data: ${bytes} bytes>`;
+      }
+      case 'dict': {
+        const dict: { [key: string]: PlistValue } = {};
+        if (tag.selfClosing) return dict;
+        for (;;) {
+          const keyTag = nextTag();
+          if (!keyTag || keyTag.closing) return dict;
+          if (keyTag.name !== 'key') {
+            throw new Error(`Malformed plist: <${keyTag.name}> where a <key> was expected.`);
+          }
+          const key = keyTag.selfClosing ? '' : textUntilClose();
+          const valueTag = nextTag();
+          if (!valueTag) throw new Error(`Malformed plist: no value for key "${key}".`);
+          dict[key] = readValue(valueTag);
+        }
+      }
+      case 'array': {
+        const array: PlistValue[] = [];
+        if (tag.selfClosing) return array;
+        for (;;) {
+          const itemTag = nextTag();
+          if (!itemTag || itemTag.closing) return array;
+          array.push(readValue(itemTag));
+        }
+      }
+      default:
+        return tag.selfClosing ? '' : textUntilClose();
+    }
+  };
+
+  let tag = nextTag();
+  while (tag && (tag.name === 'plist' || tag.closing)) tag = nextTag();
+  if (!tag) throw new Error('Malformed plist: no root element.');
+  return readValue(tag);
+}
+
+/**
+ * A .mobileprovision / profileContent blob is a DER CMS SignedData wrapper around an XML
+ * plist. Rather than implement CMS, lift the plist out by its delimiters — the same result
+ * as `security cms -D`, with no shell-out and no OS dependency.
+ */
+export function decodeProvisioningProfile(profileContentBase64: string): Record<string, any> {
+  const der = Buffer.from(profileContentBase64, 'base64');
+  // latin1 preserves every byte 1:1 through the string round-trip; the slice is re-read as UTF-8.
+  const bytes = der.toString('latin1');
+  const start = bytes.indexOf('<?xml');
+  const end = bytes.lastIndexOf('</plist>');
+  if (start === -1 || end === -1) {
+    throw new Error('No embedded plist found in the profile (unexpected CMS layout).');
+  }
+  const xml = Buffer.from(bytes.slice(start, end + '</plist>'.length), 'latin1').toString('utf-8');
+  const plist = parsePlistXml(xml);
+  if (typeof plist !== 'object' || Array.isArray(plist)) {
+    throw new Error('Embedded plist is not a dictionary.');
+  }
+  return plist as Record<string, any>;
+}
+
 export class AppStoreConnectClient {
   private config: AppStoreConfig;
   private baseUrl = 'https://api.appstoreconnect.apple.com';
@@ -111,7 +281,8 @@ export class AppStoreConnectClient {
     body?: any;
   }): Promise<any> {
     const token = this.generateToken();
-    const url = `${this.baseUrl}${endpoint}`;
+    // links.next from a paginated response is an absolute URL — pass it through unchanged.
+    const url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
     
     console.log(`Making ${options?.method || 'GET'} request to: ${url}`);
     
@@ -163,6 +334,26 @@ export class AppStoreConnectClient {
     }
     this.appIdCache.set(value, resolved);
     return resolved;
+  }
+
+  /**
+   * Fetch every page of a collection endpoint, concatenating data and included resources.
+   * maxPages is a runaway guard, not a real limit — 200-per-page covers every collection here.
+   */
+  private async makePaginatedRequest(
+    endpoint: string,
+    maxPages = 20,
+  ): Promise<{ data: any[]; included: any[] }> {
+    const data: any[] = [];
+    const included: any[] = [];
+    let next: string | undefined = endpoint;
+    for (let page = 0; next && page < maxPages; page++) {
+      const response: any = await this.makeRequest(next);
+      data.push(...(response?.data || []));
+      included.push(...(response?.included || []));
+      next = response?.links?.next;
+    }
+    return { data, included };
   }
 
   /**
@@ -1346,6 +1537,245 @@ export class AppStoreConnectClient {
     } catch (error: any) {
       console.error('Error uploading screenshot:', error);
       throw new Error(`Failed to upload screenshot: ${error.message}`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Signing identity: bundle IDs, capabilities, provisioning profiles
+  // ---------------------------------------------------------------------------
+
+  // In-process cache of the full bundle-ID list (identifier + capability relationships).
+  private bundleIdsCache?: { data: any[]; included: any[] };
+
+  /**
+   * Fetch every bundle ID on the team with its enabled capabilities. Cached per process:
+   * portal capabilities change rarely and every lookup here needs the whole list anyway,
+   * because Apple's filter[identifier] is a PARTIAL match ("eu.ecofactor" also matches
+   * "eu.ecofactortr"), so identifiers are matched exactly on this side.
+   */
+  private async fetchAllBundleIds(): Promise<{ data: any[]; included: any[] }> {
+    if (!this.bundleIdsCache) {
+      this.bundleIdsCache = await this.makePaginatedRequest(
+        '/v1/bundleIds?include=bundleIdCapabilities&limit=200',
+      );
+    }
+    return this.bundleIdsCache;
+  }
+
+  /**
+   * Resolve a bundle identifier ("eu.ecofactor") or a portal resource id ("636AMV3G4A")
+   * to the full bundle-ID record. Exact match only.
+   */
+  private async resolveBundleIdRef(identifierOrId: string): Promise<any> {
+    const value = (identifierOrId || '').trim();
+    const { data } = await this.fetchAllBundleIds();
+    const match =
+      data.find((b) => b.attributes?.identifier === value) || data.find((b) => b.id === value);
+    if (!match) {
+      throw new Error(
+        `No bundle ID found for "${value}". Pass the exact identifier (e.g. eu.ecofactor) or the portal resource id, or call list_bundle_ids to see them.`,
+      );
+    }
+    return match;
+  }
+
+  /**
+   * List bundle IDs with the capabilities enabled on each. identifier is a case-insensitive
+   * substring filter applied locally (see fetchAllBundleIds for why).
+   */
+  async listBundleIds(params: {
+    identifier?: string;
+    platform?: string;
+  }): Promise<Array<{ id: string; identifier: string; name: string; platform: string; capabilities: Array<{ capabilityType: string; entitlementKey?: string; settings?: any }> }>> {
+    try {
+      const { data, included } = await this.fetchAllBundleIds();
+      const capabilities = new Map<string, any>();
+      for (const item of included) {
+        if (item.type === 'bundleIdCapabilities') capabilities.set(item.id, item.attributes || {});
+      }
+
+      const needle = (params.identifier || '').trim().toLowerCase();
+      const platform = (params.platform || '').trim().toUpperCase();
+
+      return data
+        .filter((bundle) => {
+          const identifier = bundle.attributes?.identifier || '';
+          if (needle && !identifier.toLowerCase().includes(needle)) return false;
+          if (platform && (bundle.attributes?.platform || '') !== platform) return false;
+          return true;
+        })
+        .sort((a, b) => (a.attributes?.identifier || '').localeCompare(b.attributes?.identifier || ''))
+        .map((bundle) => ({
+          id: bundle.id,
+          identifier: bundle.attributes?.identifier || '',
+          name: bundle.attributes?.name || '',
+          platform: bundle.attributes?.platform || '',
+          capabilities: (bundle.relationships?.bundleIdCapabilities?.data || [])
+            .map((ref: any) => {
+              const attributes = capabilities.get(ref.id) || {};
+              // Relationship refs are "<bundleIdRef>_<CAPABILITY_TYPE>" — usable even when
+              // the capability was not returned in the included section.
+              const capabilityType =
+                attributes.capabilityType || String(ref.id).replace(`${bundle.id}_`, '');
+              return {
+                capabilityType,
+                entitlementKey: entitlementKeyFor(capabilityType),
+                settings: attributes.settings || undefined,
+              };
+            })
+            .sort((a: any, b: any) => a.capabilityType.localeCompare(b.capabilityType)),
+        }));
+    } catch (error: any) {
+      console.error('Error listing bundle IDs:', error);
+      throw new Error(`Failed to list bundle IDs: ${error.message}`);
+    }
+  }
+
+  /**
+   * Capabilities enabled on one bundle ID, with the entitlement key each one authorises.
+   * A capability here is Apple's GRANT — the app still has to request the key in its
+   * .entitlements file for the build to claim it.
+   */
+  async getBundleIdCapabilities(bundleId: string): Promise<{
+    id: string;
+    identifier: string;
+    name: string;
+    platform: string;
+    capabilities: Array<{ capabilityType: string; entitlementKey?: string; settings?: any }>;
+  }> {
+    try {
+      const bundle = await this.resolveBundleIdRef(bundleId);
+      // This relationship endpoint rejects the limit parameter, so don't send one.
+      const response = await this.makeRequest(`/v1/bundleIds/${bundle.id}/bundleIdCapabilities`);
+      const capabilities = (response?.data || [])
+        .map((capability: any) => ({
+          capabilityType: capability.attributes?.capabilityType || capability.id,
+          entitlementKey: entitlementKeyFor(capability.attributes?.capabilityType || ''),
+          settings: capability.attributes?.settings || undefined,
+        }))
+        .sort((a: any, b: any) => a.capabilityType.localeCompare(b.capabilityType));
+
+      return {
+        id: bundle.id,
+        identifier: bundle.attributes?.identifier || '',
+        name: bundle.attributes?.name || '',
+        platform: bundle.attributes?.platform || '',
+        capabilities,
+      };
+    } catch (error: any) {
+      console.error('Error getting bundle ID capabilities:', error);
+      throw new Error(`Failed to get bundle ID capabilities: ${error.message}`);
+    }
+  }
+
+  /**
+   * List provisioning profiles. profileContent is excluded here (it is a large DER blob) —
+   * use getProfileEntitlements for the decoded entitlements of one profile.
+   */
+  async listProfiles(params: {
+    bundleId?: string;
+    profileType?: string;
+    profileState?: string;
+    limit?: number;
+  }): Promise<Array<{ id: string; name: string; profileType: string; profileState: string; uuid: string; expirationDate: string; bundleIdentifier: string }>> {
+    try {
+      const query = [
+        'include=bundleId',
+        'fields[profiles]=name,profileType,profileState,uuid,expirationDate,createdDate,platform,bundleId',
+        'fields[bundleIds]=identifier,name',
+        'limit=200',
+      ];
+      if (params.profileType) query.push(`filter[profileType]=${encodeURIComponent(params.profileType.toUpperCase())}`);
+      if (params.profileState) query.push(`filter[profileState]=${encodeURIComponent(params.profileState.toUpperCase())}`);
+
+      const { data, included } = await this.makePaginatedRequest(`/v1/profiles?${query.join('&')}`);
+      const bundleIds = new Map<string, string>();
+      for (const item of included) {
+        if (item.type === 'bundleIds') bundleIds.set(item.id, item.attributes?.identifier || '');
+      }
+
+      const wanted = (params.bundleId || '').trim();
+      const profiles = data
+        .map((profile) => ({
+          id: profile.id,
+          name: profile.attributes?.name || '',
+          profileType: profile.attributes?.profileType || '',
+          profileState: profile.attributes?.profileState || '',
+          uuid: profile.attributes?.uuid || '',
+          expirationDate: profile.attributes?.expirationDate || '',
+          bundleIdentifier: bundleIds.get(profile.relationships?.bundleId?.data?.id) || '',
+        }))
+        .filter((profile) => !wanted || profile.bundleIdentifier === wanted)
+        .sort((a, b) => (b.expirationDate || '').localeCompare(a.expirationDate || ''));
+
+      return params.limit ? profiles.slice(0, params.limit) : profiles;
+    } catch (error: any) {
+      console.error('Error listing profiles:', error);
+      throw new Error(`Failed to list profiles: ${error.message}`);
+    }
+  }
+
+  /**
+   * Decode one provisioning profile and return the entitlements it actually authorises —
+   * the ground truth for "can this build sign that entitlement". Either pass profileId, or
+   * pass bundleId and let the newest non-expired profile of profileType be picked.
+   */
+  async getProfileEntitlements(params: {
+    profileId?: string;
+    bundleId?: string;
+    profileType?: string;
+  }): Promise<{
+    id: string;
+    name: string;
+    uuid: string;
+    profileType: string;
+    profileState: string;
+    expirationDate: string;
+    bundleIdentifier: string;
+    entitlements: Record<string, any>;
+  }> {
+    try {
+      let profileId = (params.profileId || '').trim();
+      if (!profileId) {
+        if (!params.bundleId) throw new Error('Pass either profileId or bundleId.');
+        const profileType = (params.profileType || 'IOS_APP_STORE').toUpperCase();
+        const candidates = await this.listProfiles({ bundleId: params.bundleId, profileType });
+        const usable = candidates.filter((profile) => profile.profileState === 'ACTIVE');
+        const chosen = usable[0] || candidates[0];
+        if (!chosen) {
+          throw new Error(
+            `No ${profileType} profile found for bundle ID "${params.bundleId}". Call list_profiles to see what exists.`,
+          );
+        }
+        profileId = chosen.id;
+      }
+
+      const response = await this.makeRequest(
+        `/v1/profiles/${profileId}?include=bundleId&fields[profiles]=name,profileType,profileState,uuid,expirationDate,profileContent,bundleId&fields[bundleIds]=identifier`,
+      );
+      const attributes = response?.data?.attributes || {};
+      if (!attributes.profileContent) {
+        throw new Error(`Profile ${profileId} returned no profileContent.`);
+      }
+
+      const plist = decodeProvisioningProfile(attributes.profileContent);
+      const bundleIdentifier =
+        (response?.included || []).find((item: any) => item.type === 'bundleIds')?.attributes
+          ?.identifier || '';
+
+      return {
+        id: response.data.id,
+        name: attributes.name || String(plist.Name || ''),
+        uuid: attributes.uuid || String(plist.UUID || ''),
+        profileType: attributes.profileType || '',
+        profileState: attributes.profileState || '',
+        expirationDate: attributes.expirationDate || String(plist.ExpirationDate || ''),
+        bundleIdentifier,
+        entitlements: (plist.Entitlements as Record<string, any>) || {},
+      };
+    } catch (error: any) {
+      console.error('Error getting profile entitlements:', error);
+      throw new Error(`Failed to get profile entitlements: ${error.message}`);
     }
   }
 }

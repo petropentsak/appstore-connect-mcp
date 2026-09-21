@@ -54,6 +54,32 @@ function getAppStoreConfig(): AppStoreConfig {
   };
 }
 
+// Render one capability per line, resolving the entitlement key it authorises.
+function formatCapabilities(
+  capabilities: Array<{ capabilityType: string; entitlementKey?: string; settings?: unknown }>
+): string {
+  if (capabilities.length === 0) return '  (no capabilities enabled)';
+  return capabilities
+    .map((capability) => {
+      const key =
+        capability.entitlementKey === undefined
+          ? '(entitlement key not mapped by this tool)'
+          : capability.entitlementKey === ''
+            ? '(no entitlement key needed)'
+            : capability.entitlementKey;
+      const settings = capability.settings ? ` settings: ${JSON.stringify(capability.settings)}` : '';
+      return `  - ${capability.capabilityType} -> ${key}${settings}`;
+    })
+    .join('\n');
+}
+
+// Entitlement values are booleans, strings, or arrays of strings (app groups, domains, NFC formats).
+function formatEntitlementValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => String(item)).join(', ')}]`;
+  if (value !== null && typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
 /**
  * Create and configure MCP Server with Apple Store Connect tools
  */
@@ -61,7 +87,7 @@ function createMcpServer(): Server {
   const server = new Server(
     {
       name: 'appstore-connect-server',
-      version: '2.1.0',
+      version: '2.2.0',
     },
     {
       capabilities: {
@@ -557,6 +583,81 @@ function createMcpServer(): Server {
               filePath: { type: 'string', description: 'Absolute path to the screenshot file' },
             },
             required: ['screenshotSetId', 'filePath'],
+          },
+        },
+        {
+          name: 'list_bundle_ids',
+          description:
+            "List developer-portal bundle IDs with the capabilities enabled on each and the entitlement key every capability authorises. App records in App Store Connect expose no entitlements — the portal bundle ID is where they live. A capability is Apple's grant; the app must still request the key in its .entitlements file for a build to claim it.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              identifier: {
+                type: 'string',
+                description:
+                  'Case-insensitive substring filter, e.g. "eu.ecofactor". Matched locally, so it cannot mis-hit the way Apple\'s partial filter[identifier] does.',
+              },
+              platform: {
+                type: 'string',
+                description: 'Optional platform filter: IOS, MAC_OS or UNIVERSAL',
+              },
+            },
+          },
+        },
+        {
+          name: 'get_bundle_id_capabilities',
+          description:
+            'Get the capabilities enabled on one bundle ID, each mapped to the entitlement key it authorises (e.g. CARPLAY_NAVIGATION -> com.apple.developer.carplay-maps).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              bundleId: {
+                type: 'string',
+                description:
+                  'Exact bundle identifier (e.g. eu.ecofactor) or portal resource id (e.g. 636AMV3G4A)',
+              },
+            },
+            required: ['bundleId'],
+          },
+        },
+        {
+          name: 'list_profiles',
+          description:
+            'List provisioning profiles with type, state, UUID, expiry and the bundle ID each belongs to.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              bundleId: {
+                type: 'string',
+                description: 'Exact bundle identifier to filter by (e.g. eu.ecofactor)',
+              },
+              profileType: {
+                type: 'string',
+                description:
+                  'e.g. IOS_APP_STORE, IOS_APP_DEVELOPMENT, IOS_APP_ADHOC, IOS_APP_INHOUSE',
+              },
+              profileState: { type: 'string', description: 'ACTIVE or INVALID' },
+              limit: { type: 'number', description: 'Maximum profiles to return' },
+            },
+          },
+        },
+        {
+          name: 'get_profile_entitlements',
+          description:
+            'Decode a provisioning profile and return the entitlements it authorises — the ground truth for whether a build can sign a given entitlement. Pass profileId, or pass bundleId to take the newest ACTIVE profile of profileType (default IOS_APP_STORE).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              profileId: { type: 'string', description: 'Profile resource id from list_profiles' },
+              bundleId: {
+                type: 'string',
+                description: 'Exact bundle identifier, used when profileId is omitted',
+              },
+              profileType: {
+                type: 'string',
+                description: 'Profile type to pick when resolving by bundleId (default IOS_APP_STORE)',
+              },
+            },
           },
         },
       ],
@@ -1247,6 +1348,123 @@ ${details.secondarySubcategoryTwo ? `• Secondary Subcategory 2: ${details.seco
               {
                 type: 'text',
                 text: `🖼️  Uploaded ${r.fileName} (${r.fileSize} bytes) to set ${screenshotSetId}. Screenshot ID: ${r.id}`,
+              },
+            ],
+          };
+        }
+
+        case 'list_bundle_ids': {
+          const { identifier, platform } = args as { identifier?: string; platform?: string };
+          const bundles = await appStoreClient.listBundleIds({ identifier, platform });
+
+          if (bundles.length === 0) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `No bundle IDs matched${identifier ? ` "${identifier}"` : ''}.`,
+                },
+              ],
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Found ${bundles.length} bundle ID(s):\n\n${bundles
+                  .map(
+                    (bundle) =>
+                      `• ${bundle.identifier} — ${bundle.name} (${bundle.platform}) [${bundle.id}]\n${formatCapabilities(bundle.capabilities)}`
+                  )
+                  .join('\n\n')}`,
+              },
+            ],
+          };
+        }
+
+        case 'get_bundle_id_capabilities': {
+          const { bundleId } = args as { bundleId: string };
+          const bundle = await appStoreClient.getBundleIdCapabilities(bundleId);
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Capabilities on ${bundle.identifier} — ${bundle.name} (${bundle.platform}) [${bundle.id}]:\n\n${formatCapabilities(bundle.capabilities)}\n\nThese are Apple's grants. A build only claims a key if its .entitlements file requests it; note that CarPlay is single-category at runtime, so declaring two CarPlay keys breaks CarPlay even when both are granted.`,
+              },
+            ],
+          };
+        }
+
+        case 'list_profiles': {
+          const { bundleId, profileType, profileState, limit } = args as {
+            bundleId?: string;
+            profileType?: string;
+            profileState?: string;
+            limit?: number;
+          };
+          const profiles = await appStoreClient.listProfiles({
+            bundleId,
+            profileType,
+            profileState,
+            limit,
+          });
+
+          if (profiles.length === 0) {
+            return {
+              content: [{ type: 'text', text: 'No provisioning profiles matched.' }],
+            };
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Found ${profiles.length} profile(s):\n\n${profiles
+                  .map(
+                    (profile) =>
+                      `• ${profile.name}\n  Bundle ID: ${profile.bundleIdentifier || 'N/A'}\n  Type: ${profile.profileType}\n  State: ${profile.profileState}\n  Expires: ${profile.expirationDate || 'N/A'}\n  UUID: ${profile.uuid}\n  Profile ID: ${profile.id}`
+                  )
+                  .join('\n\n')}`,
+              },
+            ],
+          };
+        }
+
+        case 'get_profile_entitlements': {
+          const { profileId, bundleId, profileType } = args as {
+            profileId?: string;
+            bundleId?: string;
+            profileType?: string;
+          };
+          const profile = await appStoreClient.getProfileEntitlements({
+            profileId,
+            bundleId,
+            profileType,
+          });
+
+          const entries = Object.entries(profile.entitlements);
+          const body = entries.length
+            ? entries
+                .map(([key, value]) => `• ${key} = ${formatEntitlementValue(value)}`)
+                .join('\n')
+            : '(none)';
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Entitlements authorised by profile "${profile.name}":
+• Bundle ID: ${profile.bundleIdentifier || 'N/A'}
+• Type: ${profile.profileType}  State: ${profile.profileState}
+• Expires: ${profile.expirationDate || 'N/A'}
+• UUID: ${profile.uuid}
+• Profile ID: ${profile.id}
+
+${body}
+
+A build signs successfully when its .entitlements file is a subset of this list.`,
               },
             ],
           };
